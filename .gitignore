@@ -238,3 +238,6 @@ bitwarden_license/src/Sso/Sso.zip
 
 # Serena
 .serena/
+
+# Agents
+.agents/
