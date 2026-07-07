@@ -5,6 +5,7 @@ using Bit.Api.Vault.Controllers;
 using Bit.Api.Vault.Models;
 using Bit.Api.Vault.Models.Request;
 using Bit.Api.Vault.Models.Response;
+using Bit.Core.AdminConsole.AbilitiesCache;
 using Bit.Core.Context;
 using Bit.Core.Entities;
 using Bit.Core.Enums;
@@ -18,7 +19,10 @@ using Bit.Core.Vault.Repositories;
 using Bit.Core.Vault.Services;
 using Bit.Test.Common.AutoFixture;
 using Bit.Test.Common.AutoFixture.Attributes;
+using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Mvc;
 using NSubstitute;
+using NSubstitute.ExceptionExtensions;
 using NSubstitute.ReturnsExtensions;
 using Xunit;
 using CipherType = Bit.Core.Vault.Enums.CipherType;
@@ -59,6 +63,67 @@ public class CiphersControllerTests
     }
 
     [Theory, BitAutoData]
+    public async Task Put_OpaqueLoginCipherWithOldClient_SkipsFido2VersionCheck(
+        User user,
+        SutProvider<CiphersController> sutProvider)
+    {
+        var cipherId = Guid.NewGuid();
+        var cipherDetails = new CipherDetails
+        {
+            Id = cipherId,
+            UserId = user.Id,
+            Type = CipherType.Login,
+            Data = "2.iv|ct|mac",
+            Edit = true,
+            ViewPassword = true,
+        };
+
+        sutProvider.GetDependency<IUserService>()
+            .GetUserByPrincipalAsync(Arg.Any<ClaimsPrincipal>())
+            .Returns(user);
+        sutProvider.GetDependency<ICipherRepository>()
+            .GetByIdAsync(cipherId, user.Id)
+            .Returns(cipherDetails);
+        sutProvider.GetDependency<ICurrentContext>()
+            .ClientVersion
+            .Returns(new Version(2022, 1, 0));
+
+        var model = new CipherRequestModel
+        {
+            Type = CipherType.Login,
+            Name = "2.name|encrypted",
+            Data = "2.iv|ct|mac",
+        };
+
+        var response = await sutProvider.Sut.Put(cipherId, model);
+
+        Assert.NotNull(response);
+        Assert.Equal("2.iv|ct|mac", response.Data);
+        Assert.Null(response.Login);
+        await sutProvider.GetDependency<ICipherService>()
+            .Received(1)
+            .SaveDetailsAsync(Arg.Any<CipherDetails>(), user.Id, Arg.Any<DateTime?>(), Arg.Any<IEnumerable<Guid>>());
+    }
+
+    [Theory, BitAutoData]
+    public async Task PutPartialShouldThrowNotFoundExceptionWhenCipherDoesNotExist(User user, Guid folderId, SutProvider<CiphersController> sutProvider)
+    {
+        var isFavorite = true;
+        var cipherId = Guid.NewGuid();
+
+        sutProvider.GetDependency<IUserService>().GetUserByPrincipalAsync(default).ReturnsForAnyArgs(user);
+        sutProvider.GetDependency<ICipherRepository>().GetByIdAsync(cipherId, user.Id).ReturnsNull();
+
+        var requestAction = async () => await sutProvider.Sut.PutPartial(cipherId, new CipherPartialRequestModel { Favorite = isFavorite, FolderId = folderId.ToString() });
+
+        await Assert.ThrowsAsync<NotFoundException>(requestAction);
+
+        await sutProvider.GetDependency<ICipherRepository>()
+            .DidNotReceive()
+            .UpdatePartialAsync(Arg.Any<Guid>(), Arg.Any<Guid>(), Arg.Any<Guid?>(), Arg.Any<bool>());
+    }
+
+    [Theory, BitAutoData]
     public async Task PutCollections_vNextShouldThrowExceptionWhenCipherIsNullOrNoOrgValue(Guid id, CipherCollectionsRequestModel model, User user,
         SutProvider<CiphersController> sutProvider)
     {
@@ -79,7 +144,7 @@ public class CiphersControllerTests
         sutProvider.GetDependency<ICipherRepository>().GetByIdAsync(id, userId).ReturnsForAnyArgs(cipherDetails);
 
         sutProvider.GetDependency<ICollectionCipherRepository>().GetManyByUserIdCipherIdAsync(userId, id).Returns((ICollection<CollectionCipher>)new List<CollectionCipher>());
-        sutProvider.GetDependency<IApplicationCacheService>().GetOrganizationAbilitiesAsync().Returns(new Dictionary<Guid, OrganizationAbility> { { cipherDetails.OrganizationId.Value, new OrganizationAbility { Id = cipherDetails.OrganizationId.Value } } });
+        sutProvider.GetDependency<IOrganizationAbilityCacheService>().GetOrganizationAbilityAsync(cipherDetails.OrganizationId.Value).Returns(new OrganizationAbility { Id = cipherDetails.OrganizationId.Value });
         var cipherService = sutProvider.GetDependency<ICipherService>();
 
         await sutProvider.Sut.PutCollections_vNext(id, model);
@@ -95,7 +160,7 @@ public class CiphersControllerTests
         sutProvider.GetDependency<ICipherRepository>().GetByIdAsync(id, userId).ReturnsForAnyArgs(cipherDetails);
 
         sutProvider.GetDependency<ICollectionCipherRepository>().GetManyByUserIdCipherIdAsync(userId, id).Returns((ICollection<CollectionCipher>)new List<CollectionCipher>());
-        sutProvider.GetDependency<IApplicationCacheService>().GetOrganizationAbilitiesAsync().Returns(new Dictionary<Guid, OrganizationAbility> { { cipherDetails.OrganizationId.Value, new OrganizationAbility { Id = cipherDetails.OrganizationId.Value } } });
+        sutProvider.GetDependency<IOrganizationAbilityCacheService>().GetOrganizationAbilityAsync(cipherDetails.OrganizationId.Value).Returns(new OrganizationAbility { Id = cipherDetails.OrganizationId.Value });
 
         var result = await sutProvider.Sut.PutCollections_vNext(id, model);
 
@@ -175,7 +240,7 @@ public class CiphersControllerTests
 
         sutProvider.GetDependency<ICipherRepository>().GetManyByOrganizationIdAsync(organization.Id).Returns(new List<Cipher> { cipherOrgDetails });
 
-        sutProvider.GetDependency<IApplicationCacheService>().GetOrganizationAbilityAsync(organization.Id).Returns(new OrganizationAbility
+        sutProvider.GetDependency<IOrganizationAbilityCacheService>().GetOrganizationAbilityAsync(organization.Id).Returns(new OrganizationAbility
         {
             Id = organization.Id,
             AllowAdminAccessToAllCollectionItems = allowAdminsAccessToAllItems
@@ -217,7 +282,7 @@ public class CiphersControllerTests
             {
                 new CipherDetails(cipherOrgDetails) { Edit = true, Manage = true }
             });
-        sutProvider.GetDependency<IApplicationCacheService>()
+        sutProvider.GetDependency<IOrganizationAbilityCacheService>()
             .GetOrganizationAbilityAsync(organization.Id)
             .Returns(new OrganizationAbility
             {
@@ -255,7 +320,7 @@ public class CiphersControllerTests
             {
                 new CipherDetails(cipherOrgDetails) { Edit = true, Manage = false }
             });
-        sutProvider.GetDependency<IApplicationCacheService>()
+        sutProvider.GetDependency<IOrganizationAbilityCacheService>()
             .GetOrganizationAbilityAsync(organization.Id)
             .Returns(new OrganizationAbility
             {
@@ -288,7 +353,7 @@ public class CiphersControllerTests
             {
                 new() { Id = cipherOrgDetails.Id, OrganizationId = cipherOrgDetails.OrganizationId }
             });
-        sutProvider.GetDependency<IApplicationCacheService>()
+        sutProvider.GetDependency<IOrganizationAbilityCacheService>()
             .GetOrganizationAbilityAsync(organization.Id)
             .Returns(new OrganizationAbility
             {
@@ -320,7 +385,7 @@ public class CiphersControllerTests
         sutProvider.GetDependency<ICurrentContext>().GetOrganization(organization.Id).Returns(organization);
         sutProvider.GetDependency<ICipherRepository>().GetOrganizationDetailsByIdAsync(cipherOrgDetails.Id).Returns(cipherOrgDetails);
         sutProvider.GetDependency<ICipherRepository>().GetManyByOrganizationIdAsync(organization.Id).Returns(new List<Cipher> { cipherOrgDetails });
-        sutProvider.GetDependency<IApplicationCacheService>().GetOrganizationAbilityAsync(organization.Id).Returns(new OrganizationAbility
+        sutProvider.GetDependency<IOrganizationAbilityCacheService>().GetOrganizationAbilityAsync(organization.Id).Returns(new OrganizationAbility
         {
             Id = organization.Id,
             AllowAdminAccessToAllCollectionItems = true
@@ -417,7 +482,7 @@ public class CiphersControllerTests
                 Manage = true
             }).ToList());
 
-        sutProvider.GetDependency<IApplicationCacheService>()
+        sutProvider.GetDependency<IOrganizationAbilityCacheService>()
             .GetOrganizationAbilityAsync(organization.Id)
             .Returns(new OrganizationAbility
             {
@@ -460,7 +525,7 @@ public class CiphersControllerTests
                 Manage = false
             }).ToList());
 
-        sutProvider.GetDependency<IApplicationCacheService>()
+        sutProvider.GetDependency<IOrganizationAbilityCacheService>()
             .GetOrganizationAbilityAsync(organization.Id)
             .Returns(new OrganizationAbility
             {
@@ -488,7 +553,7 @@ public class CiphersControllerTests
         sutProvider.GetDependency<ICipherRepository>()
             .GetManyUnassignedOrganizationDetailsByOrganizationIdAsync(organization.Id)
             .Returns(ciphers.Select(c => new CipherOrganizationDetails { Id = c.Id, OrganizationId = organization.Id }).ToList());
-        sutProvider.GetDependency<IApplicationCacheService>()
+        sutProvider.GetDependency<IOrganizationAbilityCacheService>()
             .GetOrganizationAbilityAsync(organization.Id)
             .Returns(new OrganizationAbility
             {
@@ -520,7 +585,7 @@ public class CiphersControllerTests
         sutProvider.GetDependency<IUserService>().GetProperUserId(default).ReturnsForAnyArgs(userId);
         sutProvider.GetDependency<ICurrentContext>().GetOrganization(organization.Id).Returns(organization);
         sutProvider.GetDependency<ICipherRepository>().GetManyByOrganizationIdAsync(organization.Id).Returns(ciphers);
-        sutProvider.GetDependency<IApplicationCacheService>().GetOrganizationAbilityAsync(organization.Id).Returns(new OrganizationAbility
+        sutProvider.GetDependency<IOrganizationAbilityCacheService>().GetOrganizationAbilityAsync(organization.Id).Returns(new OrganizationAbility
         {
             Id = organization.Id,
             AllowAdminAccessToAllCollectionItems = true
@@ -623,7 +688,7 @@ public class CiphersControllerTests
             {
                 cipherDetails
             });
-        sutProvider.GetDependency<IApplicationCacheService>()
+        sutProvider.GetDependency<IOrganizationAbilityCacheService>()
             .GetOrganizationAbilityAsync(organization.Id)
             .Returns(new OrganizationAbility
             {
@@ -660,7 +725,7 @@ public class CiphersControllerTests
             {
                 cipherDetails
             });
-        sutProvider.GetDependency<IApplicationCacheService>()
+        sutProvider.GetDependency<IOrganizationAbilityCacheService>()
             .GetOrganizationAbilityAsync(organization.Id)
             .Returns(new OrganizationAbility
             {
@@ -693,7 +758,7 @@ public class CiphersControllerTests
         sutProvider.GetDependency<ICipherRepository>()
             .GetManyUnassignedOrganizationDetailsByOrganizationIdAsync(organization.Id)
             .Returns(new List<CipherOrganizationDetails> { new() { Id = cipherOrgDetails.Id, OrganizationId = organization.Id } });
-        sutProvider.GetDependency<IApplicationCacheService>()
+        sutProvider.GetDependency<IOrganizationAbilityCacheService>()
             .GetOrganizationAbilityAsync(organization.Id)
             .Returns(new OrganizationAbility
             {
@@ -722,7 +787,7 @@ public class CiphersControllerTests
         sutProvider.GetDependency<ICipherRepository>().GetOrganizationDetailsByIdAsync(cipherOrgDetails.Id).Returns(cipherOrgDetails);
         sutProvider.GetDependency<ICurrentContext>().GetOrganization(organization.Id).Returns(organization);
         sutProvider.GetDependency<ICipherRepository>().GetManyByOrganizationIdAsync(organization.Id).Returns(new List<Cipher> { cipherOrgDetails });
-        sutProvider.GetDependency<IApplicationCacheService>().GetOrganizationAbilityAsync(organization.Id).Returns(new OrganizationAbility
+        sutProvider.GetDependency<IOrganizationAbilityCacheService>().GetOrganizationAbilityAsync(organization.Id).Returns(new OrganizationAbility
         {
             Id = organization.Id,
             AllowAdminAccessToAllCollectionItems = true
@@ -778,7 +843,7 @@ public class CiphersControllerTests
         sutProvider.GetDependency<ICipherRepository>()
             .GetManyByUserIdAsync(userId)
             .Returns(new List<CipherDetails> { cipherDetails });
-        sutProvider.GetDependency<IApplicationCacheService>()
+        sutProvider.GetDependency<IOrganizationAbilityCacheService>()
             .GetOrganizationAbilityAsync(organization.Id)
             .Returns(new OrganizationAbility
             {
@@ -812,7 +877,7 @@ public class CiphersControllerTests
         sutProvider.GetDependency<ICipherRepository>()
             .GetManyByUserIdAsync(userId)
             .Returns(new List<CipherDetails> { cipherDetails });
-        sutProvider.GetDependency<IApplicationCacheService>()
+        sutProvider.GetDependency<IOrganizationAbilityCacheService>()
             .GetOrganizationAbilityAsync(organization.Id)
             .Returns(new OrganizationAbility
             {
@@ -884,7 +949,7 @@ public class CiphersControllerTests
                 Manage = true
             }).ToList());
 
-        sutProvider.GetDependency<IApplicationCacheService>()
+        sutProvider.GetDependency<IOrganizationAbilityCacheService>()
             .GetOrganizationAbilityAsync(organization.Id)
             .Returns(new OrganizationAbility
             {
@@ -927,7 +992,7 @@ public class CiphersControllerTests
                 Manage = false
             }).ToList());
 
-        sutProvider.GetDependency<IApplicationCacheService>()
+        sutProvider.GetDependency<IOrganizationAbilityCacheService>()
             .GetOrganizationAbilityAsync(organization.Id)
             .Returns(new OrganizationAbility
             {
@@ -955,7 +1020,7 @@ public class CiphersControllerTests
         sutProvider.GetDependency<ICipherRepository>()
             .GetManyUnassignedOrganizationDetailsByOrganizationIdAsync(organization.Id)
             .Returns(ciphers.Select(c => new CipherOrganizationDetails { Id = c.Id, OrganizationId = organization.Id }).ToList());
-        sutProvider.GetDependency<IApplicationCacheService>()
+        sutProvider.GetDependency<IOrganizationAbilityCacheService>()
             .GetOrganizationAbilityAsync(organization.Id)
             .Returns(new OrganizationAbility
             {
@@ -994,7 +1059,7 @@ public class CiphersControllerTests
         sutProvider.GetDependency<IUserService>().GetUserByPrincipalAsync(default).ReturnsForAnyArgs(new User { Id = userId });
         sutProvider.GetDependency<ICurrentContext>().GetOrganization(organization.Id).Returns(organization);
         sutProvider.GetDependency<ICipherRepository>().GetManyByOrganizationIdAsync(organization.Id).Returns(ciphers);
-        sutProvider.GetDependency<IApplicationCacheService>().GetOrganizationAbilityAsync(organization.Id).Returns(new OrganizationAbility
+        sutProvider.GetDependency<IOrganizationAbilityCacheService>().GetOrganizationAbilityAsync(organization.Id).Returns(new OrganizationAbility
         {
             Id = organization.Id,
             AllowAdminAccessToAllCollectionItems = true
@@ -1103,7 +1168,7 @@ public class CiphersControllerTests
         sutProvider.GetDependency<ICipherRepository>()
             .GetManyByUserIdAsync(userId)
             .Returns(new List<CipherDetails> { cipherDetails });
-        sutProvider.GetDependency<IApplicationCacheService>()
+        sutProvider.GetDependency<IOrganizationAbilityCacheService>()
             .GetOrganizationAbilityAsync(organization.Id)
             .Returns(new OrganizationAbility
             {
@@ -1141,7 +1206,7 @@ public class CiphersControllerTests
         sutProvider.GetDependency<ICipherRepository>()
             .GetManyByUserIdAsync(userId)
             .Returns(new List<CipherDetails> { cipherDetails });
-        sutProvider.GetDependency<IApplicationCacheService>()
+        sutProvider.GetDependency<IOrganizationAbilityCacheService>()
             .GetOrganizationAbilityAsync(organization.Id)
             .Returns(new OrganizationAbility
             {
@@ -1172,7 +1237,7 @@ public class CiphersControllerTests
         sutProvider.GetDependency<ICipherRepository>()
             .GetManyUnassignedOrganizationDetailsByOrganizationIdAsync(organization.Id)
             .Returns(new List<CipherOrganizationDetails> { new() { Id = cipherOrgDetails.Id, OrganizationId = organization.Id } });
-        sutProvider.GetDependency<IApplicationCacheService>()
+        sutProvider.GetDependency<IOrganizationAbilityCacheService>()
             .GetOrganizationAbilityAsync(organization.Id)
             .Returns(new OrganizationAbility
             {
@@ -1203,7 +1268,7 @@ public class CiphersControllerTests
         sutProvider.GetDependency<ICipherRepository>().GetOrganizationDetailsByIdAsync(cipherOrgDetails.Id).Returns(cipherOrgDetails);
         sutProvider.GetDependency<ICurrentContext>().GetOrganization(organization.Id).Returns(organization);
         sutProvider.GetDependency<ICipherRepository>().GetManyByOrganizationIdAsync(organization.Id).Returns(new List<Cipher> { cipherOrgDetails });
-        sutProvider.GetDependency<IApplicationCacheService>().GetOrganizationAbilityAsync(organization.Id).Returns(new OrganizationAbility
+        sutProvider.GetDependency<IOrganizationAbilityCacheService>().GetOrganizationAbilityAsync(organization.Id).Returns(new OrganizationAbility
         {
             Id = organization.Id,
             AllowAdminAccessToAllCollectionItems = true
@@ -1265,7 +1330,7 @@ public class CiphersControllerTests
         sutProvider.GetDependency<ICipherRepository>()
             .GetManyByUserIdAsync(userId)
             .Returns(new List<CipherDetails> { cipherDetails });
-        sutProvider.GetDependency<IApplicationCacheService>()
+        sutProvider.GetDependency<IOrganizationAbilityCacheService>()
             .GetOrganizationAbilityAsync(organization.Id)
             .Returns(new OrganizationAbility
             {
@@ -1302,7 +1367,7 @@ public class CiphersControllerTests
         sutProvider.GetDependency<ICipherRepository>()
             .GetManyByUserIdAsync(userId)
             .Returns(new List<CipherDetails> { cipherDetails });
-        sutProvider.GetDependency<IApplicationCacheService>()
+        sutProvider.GetDependency<IOrganizationAbilityCacheService>()
             .GetOrganizationAbilityAsync(organization.Id)
             .Returns(new OrganizationAbility
             {
@@ -1372,7 +1437,7 @@ public class CiphersControllerTests
                 Manage = true
             }).ToList());
 
-        sutProvider.GetDependency<IApplicationCacheService>()
+        sutProvider.GetDependency<IOrganizationAbilityCacheService>()
             .GetOrganizationAbilityAsync(organization.Id)
             .Returns(new OrganizationAbility
             {
@@ -1431,7 +1496,7 @@ public class CiphersControllerTests
                 Type = CipherType.Login,
                 Data = JsonSerializer.Serialize(new CipherLoginData())
             }).ToList());
-        sutProvider.GetDependency<IApplicationCacheService>()
+        sutProvider.GetDependency<IOrganizationAbilityCacheService>()
             .GetOrganizationAbilityAsync(organization.Id)
             .Returns(new OrganizationAbility
             {
@@ -1473,7 +1538,7 @@ public class CiphersControllerTests
                 ids.All(id => model.Ids.Contains(id.ToString())) && ids.Count() == model.Ids.Count()),
                 userId, organization.Id, true)
             .Returns(cipherOrgDetails);
-        sutProvider.GetDependency<IApplicationCacheService>()
+        sutProvider.GetDependency<IOrganizationAbilityCacheService>()
             .GetOrganizationAbilityAsync(organization.Id)
             .Returns(new OrganizationAbility
             {
@@ -1507,7 +1572,7 @@ public class CiphersControllerTests
         sutProvider.GetDependency<IUserService>().GetProperUserId(default).ReturnsForAnyArgs(userId);
         sutProvider.GetDependency<ICurrentContext>().GetOrganization(organization.Id).Returns(organization);
         sutProvider.GetDependency<ICipherRepository>().GetManyByOrganizationIdAsync(organization.Id).Returns(ciphers);
-        sutProvider.GetDependency<IApplicationCacheService>().GetOrganizationAbilityAsync(organization.Id).Returns(new OrganizationAbility
+        sutProvider.GetDependency<IOrganizationAbilityCacheService>().GetOrganizationAbilityAsync(organization.Id).Returns(new OrganizationAbility
         {
             Id = organization.Id,
             AllowAdminAccessToAllCollectionItems = true
@@ -1983,12 +2048,9 @@ public class CiphersControllerTests
             .GetByIdAsync(cipherId, userId)
             .Returns(sharedCipher);
 
-        sutProvider.GetDependency<IApplicationCacheService>()
-            .GetOrganizationAbilitiesAsync()
-            .Returns(new Dictionary<Guid, OrganizationAbility>
-            {
-                { organizationId, new OrganizationAbility { Id = organizationId } }
-            });
+        sutProvider.GetDependency<IOrganizationAbilityCacheService>()
+            .GetOrganizationAbilityAsync(organizationId)
+            .Returns(new OrganizationAbility { Id = organizationId });
 
         var result = await sutProvider.Sut.PutShare(cipherId, model);
 
@@ -2061,12 +2123,9 @@ public class CiphersControllerTests
             .GetByIdAsync(cipherId, userId)
             .Returns(sharedCipher);
 
-        sutProvider.GetDependency<IApplicationCacheService>()
-            .GetOrganizationAbilitiesAsync()
-            .Returns(new Dictionary<Guid, OrganizationAbility>
-            {
-                { organizationId, new OrganizationAbility { Id = organizationId } }
-            });
+        sutProvider.GetDependency<IOrganizationAbilityCacheService>()
+            .GetOrganizationAbilityAsync(organizationId)
+            .Returns(new OrganizationAbility { Id = organizationId });
 
         var result = await sutProvider.Sut.PutShare(cipherId, model);
 
@@ -2140,16 +2199,291 @@ public class CiphersControllerTests
             .GetByIdAsync(cipherId, userId)
             .Returns(sharedCipher);
 
-        sutProvider.GetDependency<IApplicationCacheService>()
-            .GetOrganizationAbilitiesAsync()
-            .Returns(new Dictionary<Guid, OrganizationAbility>
-            {
-                { organizationId, new OrganizationAbility { Id = organizationId } }
-            });
+        sutProvider.GetDependency<IOrganizationAbilityCacheService>()
+            .GetOrganizationAbilityAsync(organizationId)
+            .Returns(new OrganizationAbility { Id = organizationId });
 
         var result = await sutProvider.Sut.PutShare(cipherId, model);
 
         Assert.Equal(newFolderId, result.FolderId);
         Assert.True(result.Favorite);
+    }
+
+    [Theory, BitAutoData]
+    public async Task RenewFileUploadUrl_WithReadOnlyUser_ThrowsBadRequest(
+        Guid cipherId, string attachmentId, Guid userId, Guid organizationId,
+        SutProvider<CiphersController> sutProvider)
+    {
+        var attachmentData = new CipherAttachment.MetaData
+        {
+            Size = 100,
+            FileName = "test.txt",
+            Validated = false
+        };
+
+        var cipherDetails = new CipherDetails
+        {
+            Id = cipherId,
+            OrganizationId = organizationId,
+            Type = CipherType.Login,
+            Data = "{}",
+            Edit = false
+        };
+        cipherDetails.SetAttachments(new Dictionary<string, CipherAttachment.MetaData>
+        {
+            { attachmentId, attachmentData }
+        });
+
+        sutProvider.GetDependency<IUserService>().GetProperUserId(default).ReturnsForAnyArgs(userId);
+        sutProvider.GetDependency<ICipherRepository>().GetByIdAsync(cipherId, userId).Returns(cipherDetails);
+        sutProvider.GetDependency<ICurrentContext>().GetOrganization(organizationId).ReturnsNull();
+        sutProvider.GetDependency<ICipherService>()
+            .ValidateCipherEditForAttachmentAsync(cipherDetails, userId, false, attachmentData.Size)
+            .ThrowsAsync(new BadRequestException("You do not have permissions to edit this."));
+
+        var exception = await Assert.ThrowsAsync<BadRequestException>(
+            () => sutProvider.Sut.RenewFileUploadUrl(cipherId, attachmentId));
+        Assert.Equal("You do not have permissions to edit this.", exception.Message);
+    }
+
+    [Theory]
+    [BitAutoData(OrganizationUserType.Owner)]
+    [BitAutoData(OrganizationUserType.Admin)]
+    public async Task RenewFileUploadUrl_WithOrgAdmin_Success(
+        OrganizationUserType userType, Guid cipherId, string attachmentId, Guid userId,
+        CurrentContextOrganization organization, SutProvider<CiphersController> sutProvider)
+    {
+        var attachmentData = new CipherAttachment.MetaData
+        {
+            Size = 100,
+            FileName = "test.txt",
+            Validated = false
+        };
+
+        var cipherDetails = new CipherDetails
+        {
+            Id = cipherId,
+            OrganizationId = organization.Id,
+            Type = CipherType.Login,
+            Data = "{}"
+        };
+        cipherDetails.SetAttachments(new Dictionary<string, CipherAttachment.MetaData>
+        {
+            { attachmentId, attachmentData }
+        });
+
+        organization.Type = userType;
+
+        sutProvider.GetDependency<IUserService>().GetProperUserId(default).ReturnsForAnyArgs(userId);
+        sutProvider.GetDependency<ICipherRepository>().GetByIdAsync(cipherId, userId).Returns(cipherDetails);
+        sutProvider.GetDependency<ICurrentContext>().GetOrganization(organization.Id).Returns(organization);
+        sutProvider.GetDependency<ICipherRepository>().GetManyByOrganizationIdAsync(organization.Id)
+            .Returns(new List<Cipher> { cipherDetails });
+        sutProvider.GetDependency<IOrganizationAbilityCacheService>().GetOrganizationAbilityAsync(organization.Id)
+            .Returns(new OrganizationAbility { Id = organization.Id, AllowAdminAccessToAllCollectionItems = true });
+
+        var expectedUrl = "https://example.com/upload";
+        sutProvider.GetDependency<IAttachmentStorageService>()
+            .GetAttachmentUploadUrlAsync(cipherDetails, Arg.Any<CipherAttachment.MetaData>())
+            .Returns(expectedUrl);
+
+        var result = await sutProvider.Sut.RenewFileUploadUrl(cipherId, attachmentId);
+
+        Assert.Equal(expectedUrl, result.Url);
+        await sutProvider.GetDependency<ICipherService>().Received(1)
+            .ValidateCipherEditForAttachmentAsync(cipherDetails, userId, true, attachmentData.Size);
+    }
+
+    [Theory, BitAutoData]
+    public async Task RenewFileUploadUrl_WithMissingAttachment_ThrowsNotFoundException(
+        Guid cipherId, string attachmentId, Guid userId, SutProvider<CiphersController> sutProvider)
+    {
+        var cipherDetails = new CipherDetails
+        {
+            Id = cipherId,
+            Type = CipherType.Login,
+            Data = "{}"
+        };
+
+        sutProvider.GetDependency<IUserService>().GetProperUserId(default).ReturnsForAnyArgs(userId);
+        sutProvider.GetDependency<ICipherRepository>().GetByIdAsync(cipherId, userId).Returns(cipherDetails);
+
+        await Assert.ThrowsAsync<NotFoundException>(() => sutProvider.Sut.RenewFileUploadUrl(cipherId, attachmentId));
+    }
+
+    [Theory, BitAutoData]
+    public async Task RenewFileUploadUrl_WithValidatedAttachment_ThrowsNotFoundException(
+        Guid cipherId, string attachmentId, Guid userId, SutProvider<CiphersController> sutProvider)
+    {
+        var attachmentData = new CipherAttachment.MetaData
+        {
+            Size = 100,
+            FileName = "test.txt",
+            Validated = true
+        };
+
+        var cipherDetails = new CipherDetails
+        {
+            Id = cipherId,
+            Type = CipherType.Login,
+            Data = "{}"
+        };
+        cipherDetails.SetAttachments(new Dictionary<string, CipherAttachment.MetaData>
+        {
+            { attachmentId, attachmentData }
+        });
+
+        sutProvider.GetDependency<IUserService>().GetProperUserId(default).ReturnsForAnyArgs(userId);
+        sutProvider.GetDependency<ICipherRepository>().GetByIdAsync(cipherId, userId).Returns(cipherDetails);
+
+        await Assert.ThrowsAsync<NotFoundException>(() => sutProvider.Sut.RenewFileUploadUrl(cipherId, attachmentId));
+    }
+
+    [Theory, BitAutoData]
+    public async Task PostFileForExistingAttachment_WithInvalidContentType_ThrowsBadRequest(
+        Guid cipherId, string attachmentId, Guid userId, SutProvider<CiphersController> sutProvider)
+    {
+        sutProvider.GetDependency<IUserService>().GetProperUserId(default).ReturnsForAnyArgs(userId);
+
+        var httpContext = new DefaultHttpContext();
+        httpContext.Request.ContentType = "application/json";
+        sutProvider.Sut.ControllerContext = new ControllerContext { HttpContext = httpContext };
+
+        var exception = await Assert.ThrowsAsync<BadRequestException>(
+            () => sutProvider.Sut.PostFileForExistingAttachment(cipherId, attachmentId));
+        Assert.Equal("Invalid content.", exception.Message);
+    }
+    [Theory, BitAutoData]
+    public async Task GetAttachmentData_CipherNotFound_ThrowsNotFoundException(
+        Guid cipherId, string attachmentId, Guid userId,
+        SutProvider<CiphersController> sutProvider)
+    {
+        sutProvider.GetDependency<IUserService>().GetProperUserId(default).ReturnsForAnyArgs((Guid?)userId);
+        sutProvider.GetDependency<ICipherRepository>().GetByIdAsync(cipherId, userId).ReturnsNull();
+
+        await Assert.ThrowsAsync<NotFoundException>(
+            () => sutProvider.Sut.GetAttachmentData(cipherId, attachmentId));
+    }
+
+    [Theory, BitAutoData]
+    public async Task GetAttachmentData_CipherFound_ReturnsAttachmentResponse(
+        Guid cipherId, string attachmentId, Guid userId,
+        SutProvider<CiphersController> sutProvider)
+    {
+        sutProvider.GetDependency<IUserService>().GetProperUserId(default).ReturnsForAnyArgs((Guid?)userId);
+
+        var cipherDetails = new CipherDetails { Id = cipherId, UserId = userId, Type = CipherType.Login, Data = "{}" };
+        sutProvider.GetDependency<ICipherRepository>().GetByIdAsync(cipherId, userId)
+            .Returns(Task.FromResult(cipherDetails));
+
+        var responseData = new AttachmentResponseData
+        {
+            Id = attachmentId,
+            Url = "https://example.com/download",
+            Data = new CipherAttachment.MetaData { FileName = "test.txt" },
+            Cipher = cipherDetails,
+        };
+        sutProvider.GetDependency<ICipherService>()
+            .GetAttachmentDownloadDataAsync(cipherDetails, attachmentId)
+            .Returns(Task.FromResult(responseData));
+
+        var result = await sutProvider.Sut.GetAttachmentData(cipherId, attachmentId);
+
+        Assert.NotNull(result);
+        Assert.Equal(attachmentId, result.Id);
+    }
+
+    [Theory, BitAutoData]
+    public async Task DownloadAttachmentAsync_EmptyToken_ThrowsNotFoundException(
+        SutProvider<CiphersController> sutProvider)
+    {
+        await Assert.ThrowsAsync<NotFoundException>(
+            () => sutProvider.Sut.DownloadAttachmentAsync(string.Empty));
+    }
+
+    [Theory, BitAutoData]
+    public async Task DownloadAttachmentAsync_InvalidToken_ThrowsNotFoundException(
+        SutProvider<CiphersController> sutProvider)
+    {
+        sutProvider.GetDependency<IAttachmentStorageService>()
+            .ParseAttachmentDownloadToken(Arg.Any<string>())
+            .Throws(new NotFoundException());
+
+        await Assert.ThrowsAsync<NotFoundException>(
+            () => sutProvider.Sut.DownloadAttachmentAsync("invalid-token"));
+    }
+
+    [Theory, BitAutoData]
+    public async Task DownloadAttachmentAsync_ValidToken_CipherNotFound_ThrowsNotFoundException(
+        Guid cipherId, string attachmentId,
+        SutProvider<CiphersController> sutProvider)
+    {
+        sutProvider.GetDependency<IAttachmentStorageService>()
+            .ParseAttachmentDownloadToken(Arg.Any<string>())
+            .Returns((cipherId, attachmentId));
+
+        sutProvider.GetDependency<ICipherRepository>().GetByIdAsync(cipherId).ReturnsNull();
+
+        await Assert.ThrowsAsync<NotFoundException>(
+            () => sutProvider.Sut.DownloadAttachmentAsync("some-token"));
+    }
+
+    [Theory, BitAutoData]
+    public async Task DownloadAttachmentAsync_ValidToken_NoAttachments_ThrowsNotFoundException(
+        Guid cipherId, string attachmentId,
+        SutProvider<CiphersController> sutProvider)
+    {
+        sutProvider.GetDependency<IAttachmentStorageService>()
+            .ParseAttachmentDownloadToken(Arg.Any<string>())
+            .Returns((cipherId, attachmentId));
+
+        var cipher = new Cipher { Id = cipherId, Attachments = null };
+        sutProvider.GetDependency<ICipherRepository>().GetByIdAsync(cipherId).Returns(cipher);
+
+        await Assert.ThrowsAsync<NotFoundException>(
+            () => sutProvider.Sut.DownloadAttachmentAsync("some-token"));
+    }
+
+    [Theory, BitAutoData]
+    public async Task DownloadAttachmentAsync_ValidToken_ReturnsFile(
+        Guid cipherId, string attachmentId,
+        SutProvider<CiphersController> sutProvider)
+    {
+        var fileName = "secret-document.txt";
+        var fileContent = new byte[] { 1, 2, 3 };
+        var stream = new MemoryStream(fileContent);
+
+        var metaData = new CipherAttachment.MetaData
+        {
+            AttachmentId = attachmentId,
+            FileName = fileName,
+            Size = fileContent.Length,
+        };
+
+        var cipher = new Cipher
+        {
+            Id = cipherId,
+            Attachments = JsonSerializer.Serialize(
+                new Dictionary<string, CipherAttachment.MetaData> { { attachmentId, metaData } }),
+        };
+
+        sutProvider.GetDependency<IAttachmentStorageService>()
+            .ParseAttachmentDownloadToken(Arg.Any<string>())
+            .Returns((cipherId, attachmentId));
+
+        sutProvider.GetDependency<ICipherRepository>()
+            .GetByIdAsync(cipherId)
+            .Returns(cipher);
+
+        sutProvider.GetDependency<IAttachmentStorageService>()
+            .GetAttachmentReadStreamAsync(cipher, Arg.Any<CipherAttachment.MetaData>())
+            .Returns(stream);
+
+        var result = await sutProvider.Sut.DownloadAttachmentAsync("valid-token");
+
+        var fileResult = Assert.IsType<FileStreamResult>(result);
+        Assert.Equal("application/octet-stream", fileResult.ContentType);
+        Assert.Equal(fileName, fileResult.FileDownloadName);
+        Assert.Same(stream, fileResult.FileStream);
     }
 }

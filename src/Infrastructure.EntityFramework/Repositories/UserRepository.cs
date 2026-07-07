@@ -1,7 +1,7 @@
 ﻿using AutoMapper;
-using Bit.Core;
 using Bit.Core.Billing.Premium.Models;
 using Bit.Core.Enums;
+using Bit.Core.KeyManagement.Kdf;
 using Bit.Core.KeyManagement.Models.Data;
 using Bit.Core.KeyManagement.UserKey;
 using Bit.Core.Models.Data;
@@ -9,8 +9,6 @@ using Bit.Core.Repositories;
 using Bit.Infrastructure.EntityFramework.Models;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
-
-#nullable enable
 
 namespace Bit.Infrastructure.EntityFramework.Repositories;
 
@@ -75,7 +73,8 @@ public class UserRepository : Repository<Core.Entities.User, User, Guid>, IUserR
                     Kdf = e.Kdf,
                     KdfIterations = e.KdfIterations,
                     KdfMemory = e.KdfMemory,
-                    KdfParallelism = e.KdfParallelism
+                    KdfParallelism = e.KdfParallelism,
+                    MasterPasswordSalt = e.MasterPasswordSalt
                 }).SingleOrDefaultAsync();
         }
     }
@@ -309,7 +308,7 @@ public class UserRepository : Repository<Core.Entities.User, User, Guid>, IUserR
         userEntity.SecurityVersion = accountKeysData.SecurityStateData.SecurityVersion;
         userEntity.SignedPublicKey = accountKeysData.PublicKeyEncryptionKeyPairData.SignedPublicKey;
 
-        // Replace existing keypair if it exists
+        // Replace existing key-pair if it exists
         var existingKeyPair = await dbContext.UserSignatureKeyPairs
             .FirstOrDefaultAsync(x => x.UserId == userId);
         if (existingKeyPair != null)
@@ -527,9 +526,9 @@ public class UserRepository : Repository<Core.Entities.User, User, Guid>, IUserR
             userEntity.Key = keyConnectorWrappedUserKey;
             // Key Connector does not use KDF, so we set some defaults
             userEntity.Kdf = KdfType.Argon2id;
-            userEntity.KdfIterations = AuthConstants.ARGON2_ITERATIONS.Default;
-            userEntity.KdfMemory = AuthConstants.ARGON2_MEMORY.Default;
-            userEntity.KdfParallelism = AuthConstants.ARGON2_PARALLELISM.Default;
+            userEntity.KdfIterations = KdfConstants.ARGON2_ITERATIONS.Default;
+            userEntity.KdfMemory = KdfConstants.ARGON2_MEMORY.Default;
+            userEntity.KdfParallelism = KdfConstants.ARGON2_PARALLELISM.Default;
             userEntity.UsesKeyConnector = true;
             userEntity.RevisionDate = timestamp;
             userEntity.AccountRevisionDate = timestamp;
@@ -563,7 +562,11 @@ public class UserRepository : Repository<Core.Entities.User, User, Guid>, IUserR
             userEntity.KdfParallelism = masterPasswordUnlockData.Kdf.Parallelism;
             userEntity.RevisionDate = timestamp;
             userEntity.AccountRevisionDate = timestamp;
-
+            userEntity.MasterPasswordSalt = masterPasswordUnlockData.Salt;
+            // TODO (PM-35501): Persist SecurityStamp so the rotation done in
+            // MasterPasswordService.BuildUpdateUserDelegateSetInitialMasterPassword
+            // is persisted.
+            // userEntity.LastPasswordChangeDate = timestamp; This needs adding in PM-34905
             await dbContext.SaveChangesAsync();
         };
     }
@@ -581,6 +584,29 @@ public class UserRepository : Repository<Core.Entities.User, User, Guid>, IUserR
         }
 
         await transaction.CommitAsync();
+    }
+
+    public UpdateUserData UpdateMasterPasswordUnlockData(Guid userId, RegisterFinishData registerFinishData)
+    {
+        return async (_, _) =>
+        {
+            using var scope = ServiceScopeFactory.CreateScope();
+            var dbContext = GetDatabaseContext(scope);
+
+            var userEntity = await dbContext.Users.FindAsync(userId) ?? throw new ArgumentException("User not found", nameof(userId));
+            var timestamp = DateTime.UtcNow;
+
+            userEntity.Kdf = registerFinishData.Kdf.KdfType;
+            userEntity.KdfIterations = registerFinishData.Kdf.Iterations;
+            userEntity.KdfMemory = registerFinishData.Kdf.Memory;
+            userEntity.KdfParallelism = registerFinishData.Kdf.Parallelism;
+            userEntity.MasterPasswordSalt = registerFinishData.Salt;
+            userEntity.Key = registerFinishData.MasterKeyWrappedUserKey;
+            userEntity.RevisionDate = timestamp;
+            userEntity.AccountRevisionDate = timestamp;
+
+            await dbContext.SaveChangesAsync();
+        };
     }
 
     private static void MigrateDefaultUserCollectionsToShared(DatabaseContext dbContext, IEnumerable<Guid> userIds)

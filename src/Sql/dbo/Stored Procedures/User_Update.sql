@@ -45,7 +45,9 @@
     @SecurityState VARCHAR(MAX) = NULL,
     @SecurityVersion INT = NULL,
     @SignedPublicKey VARCHAR(MAX) = NULL,
-    @V2UpgradeToken VARCHAR(MAX) = NULL
+    @V2UpgradeToken VARCHAR(MAX) = NULL,
+    @MasterPasswordSalt NVARCHAR(256) = NULL,
+    @LastApiKeyRotationDate DATETIME2(7) = NULL
 AS
 BEGIN
     SET NOCOUNT ON
@@ -99,7 +101,9 @@ BEGIN
         [SecurityVersion] = @SecurityVersion,
         [SignedPublicKey] = @SignedPublicKey,
         [MaxStorageGbIncreased] = @MaxStorageGb,
-        [V2UpgradeToken] = @V2UpgradeToken
+        [V2UpgradeToken] = @V2UpgradeToken,
+        [MasterPasswordSalt] = @MasterPasswordSalt,
+        [LastApiKeyRotationDate] = @LastApiKeyRotationDate
     WHERE
         [Id] = @Id
 END

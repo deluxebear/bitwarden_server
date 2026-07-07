@@ -14,9 +14,13 @@ internal sealed class CreateOwnerStep : IStep
     {
         var org = context.RequireOrganization();
         var password = context.GetPassword();
-        var ownerEmail = context.GetMangler().Mangle($"owner@{context.RequireDomain()}");
-        var userKeys = RustSdkService.GenerateUserKeys(ownerEmail, password);
-        var (owner, _) = UserSeeder.Create(ownerEmail, context.GetPasswordHasher(), context.GetMangler(), keys: userKeys, password: password);
+        var kdfIterations = context.GetKdfIterations();
+        var emailOverride = context.GetOwnerEmailOverride();
+        var ownerEmail = !string.IsNullOrWhiteSpace(emailOverride)
+            ? context.GetMangler().Mangle(emailOverride)
+            : context.GetMangler().Mangle($"owner@{context.RequireDomain()}");
+        var userKeys = RustSdkService.GenerateUserKeys(ownerEmail, password, kdfIterations, poolIndex: 0);
+        var (owner, _) = UserSeeder.Create(ownerEmail, context.GetPasswordHasher(), context.GetMangler(), keys: userKeys, password: password, kdfIterations: kdfIterations);
 
 
         var ownerOrgKey = RustSdkService.GenerateUserOrganizationKey(owner.PublicKey!, context.RequireOrgKey());

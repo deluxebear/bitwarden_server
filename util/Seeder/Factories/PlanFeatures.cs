@@ -2,6 +2,7 @@
 using System.Text;
 using Bit.Core.AdminConsole.Entities;
 using Bit.Core.Billing.Enums;
+using Bit.Seeder.Options;
 
 namespace Bit.Seeder.Factories;
 
@@ -13,13 +14,6 @@ public static class PlanFeatures
 {
     internal static void Apply(Organization org, PlanType planType)
     {
-        // Org-level admin settings — not plan-gated, safe defaults for seeding
-        org.UseAutomaticUserConfirmation = true;
-        org.AllowAdminAccessToAllCollectionItems = true;
-        org.LimitCollectionCreation = true;
-        org.LimitCollectionDeletion = true;
-        org.LimitItemDeletion = true;
-
         switch (planType)
         {
             case PlanType.Free:
@@ -78,6 +72,45 @@ public static class PlanFeatures
         }
     }
 
+    /// <summary>
+    /// Applies overrides on top of the organization's initial values.
+    /// Only non-null properties are applied; null means "leave the value unchanged from <see cref="OrganizationSeeder.Create"/>".
+    /// </summary>
+    internal static void ApplyOrganizationOverrides(Organization org, OrganizationOverrides? overrides)
+    {
+        if (overrides is null)
+        {
+            return;
+        }
+
+        org.UseAutomaticUserConfirmation = overrides.UseAutomaticUserConfirmation ?? org.UseAutomaticUserConfirmation;
+        org.AllowAdminAccessToAllCollectionItems = overrides.AllowAdminAccessToAllCollectionItems ?? org.AllowAdminAccessToAllCollectionItems;
+        org.LimitItemDeletion = overrides.LimitItemDeletion ?? org.LimitItemDeletion;
+        org.LimitCollectionCreation = overrides.LimitCollectionCreation ?? org.LimitCollectionCreation;
+        org.LimitCollectionDeletion = overrides.LimitCollectionDeletion ?? org.LimitCollectionDeletion;
+    }
+
+    /// <summary>
+    /// Enables Secrets Manager on an organization by populating its subscription fields.
+    /// Seat defaults mirror the plan's SecretsManager base values in test/Core.Test/Billing/Mocks/Plans/.
+    /// </summary>
+    internal static void EnableSecretsManager(Organization org, int? smSeats, int? smServiceAccounts)
+    {
+        var baseServiceAccounts = org.PlanType switch
+        {
+            PlanType.EnterpriseMonthly or PlanType.EnterpriseAnnually
+                or PlanType.TeamsAnnually => 50,
+            PlanType.TeamsMonthly or PlanType.TeamsStarter => 20,
+            _ => throw new ArgumentException(
+                $"PlanType '{org.PlanType}' does not support Secrets Manager. " +
+                "Supported: TeamsMonthly, TeamsAnnually, TeamsStarter, EnterpriseMonthly, EnterpriseAnnually.")
+        };
+
+        org.UseSecretsManager = true;
+        org.SmSeats = smSeats ?? org.Seats;
+        org.SmServiceAccounts = smServiceAccounts ?? baseServiceAccounts;
+    }
+
     public static PlanType Parse(string? planTypeString)
     {
         if (string.IsNullOrEmpty(planTypeString))
@@ -115,6 +148,8 @@ public static class PlanFeatures
             PlanType.TeamsStarter => (10, 10, 10),
             PlanType.EnterpriseMonthly => (1, 185, 17),
             PlanType.EnterpriseAnnually => (1, 12000, 60),
+            // Intentional: PlanType has 20+ variants including legacy plans. Seeder only models
+            // the 7 current plans; all others get reasonable defaults. Not a bug.
             _ => (1, 100, 10)
         };
 
@@ -163,6 +198,7 @@ public static class PlanFeatures
         org.UseRiskInsights = false;
         org.UseAdminSponsoredFamilies = false;
         org.SyncSeats = false;
+        org.UseInviteLinks = false;
     }
 
     private static void ApplyTeamsFeatures(Organization org)
@@ -189,6 +225,7 @@ public static class PlanFeatures
         org.UseRiskInsights = false;
         org.UseAdminSponsoredFamilies = false;
         org.SyncSeats = true;
+        org.UseInviteLinks = false;
     }
 
     private static void ApplyEnterpriseFeatures(Organization org)
@@ -213,7 +250,9 @@ public static class PlanFeatures
         org.UsePasswordManager = true;
         org.UseSecretsManager = true;
         org.UseRiskInsights = true;
+        org.UseMyItems = true;
         org.UseAdminSponsoredFamilies = true;
         org.SyncSeats = true;
+        org.UseInviteLinks = true;
     }
 }

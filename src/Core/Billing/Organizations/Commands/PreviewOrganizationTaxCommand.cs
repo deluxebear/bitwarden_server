@@ -8,19 +8,22 @@ using Bit.Core.Billing.Organizations.Models;
 using Bit.Core.Billing.Payment.Models;
 using Bit.Core.Billing.Pricing;
 using Bit.Core.Billing.Services;
+using Bit.Core.Billing.Tax.Utilities;
+using Bit.Core.Entities;
 using Bit.Core.Enums;
+using Bit.Core.Services;
 using Microsoft.Extensions.Logging;
 using OneOf;
 using Stripe;
 
 namespace Bit.Core.Billing.Organizations.Commands;
 
-using static Core.Constants;
 using static StripeConstants;
 
 public interface IPreviewOrganizationTaxCommand
 {
     Task<BillingCommandResult<(decimal Tax, decimal Total)>> Run(
+        User user,
         OrganizationSubscriptionPurchase purchase,
         BillingAddress billingAddress);
 
@@ -35,12 +38,15 @@ public interface IPreviewOrganizationTaxCommand
 }
 
 public class PreviewOrganizationTaxCommand(
+    IFeatureService featureService,
     ILogger<PreviewOrganizationTaxCommand> logger,
     IPricingClient pricingClient,
-    IStripeAdapter stripeAdapter)
+    IStripeAdapter stripeAdapter,
+    ISubscriptionDiscountService subscriptionDiscountService)
     : BaseBillingCommand<PreviewOrganizationTaxCommand>(logger), IPreviewOrganizationTaxCommand
 {
     public Task<BillingCommandResult<(decimal Tax, decimal Total)>> Run(
+        User user,
         OrganizationSubscriptionPurchase purchase,
         BillingAddress billingAddress)
         => HandleAsync<(decimal, decimal)>(async () =>
@@ -75,6 +81,8 @@ public class PreviewOrganizationTaxCommand(
                             Quantity = purchase.SecretsManager.Seats
                         }
                     ]);
+                    // System coupon takes precedence for standalone Secrets Manager purchases.
+                    // Any user-provided coupons are ignored in this scenario.
                     options.Discounts =
                     [
                         new InvoiceDiscountOptions
@@ -117,6 +125,29 @@ public class PreviewOrganizationTaxCommand(
                                 Price = plan.SecretsManager.StripeServiceAccountPlanId,
                                 Quantity = purchase.SecretsManager.AdditionalServiceAccounts
                             });
+                        }
+                    }
+
+                    // Validate all coupons at once. If all are eligible, apply them; otherwise skip gracefully.
+                    // Only Families plans support user-provided coupons.
+                    if (purchase is { Coupons.Length: > 0, Tier: ProductTierType.Families })
+                    {
+                        var trimmedCoupons = purchase.Coupons
+                            .Where(c => !string.IsNullOrWhiteSpace(c))
+                            .Select(c => c.Trim())
+                            .ToArray();
+
+                        if (trimmedCoupons.Length > 0)
+                        {
+                            var allValid = await subscriptionDiscountService.ValidateDiscountEligibilityForUserAsync(
+                                user, trimmedCoupons, DiscountTierType.Families);
+
+                            if (allValid)
+                            {
+                                options.Discounts = trimmedCoupons
+                                    .Select(c => new InvoiceDiscountOptions { Coupon = c })
+                                    .ToList();
+                            }
                         }
                     }
 
@@ -344,7 +375,7 @@ public class PreviewOrganizationTaxCommand(
         Convert.ToDecimal(invoice.TotalTaxes.Sum(invoiceTotalTax => invoiceTotalTax.Amount)) / 100,
         Convert.ToDecimal(invoice.Total) / 100);
 
-    private static InvoiceCreatePreviewOptions GetBaseOptions(
+    private InvoiceCreatePreviewOptions GetBaseOptions(
         OneOf<Customer, BillingAddress> addressChoice,
         bool businessUse)
     {
@@ -364,11 +395,26 @@ public class PreviewOrganizationTaxCommand(
             CustomerDetails = new InvoiceCustomerDetailsOptions
             {
                 Address = new AddressOptions { Country = country, PostalCode = postalCode },
-                TaxExempt = businessUse && country != CountryAbbreviations.UnitedStates
-                    ? TaxExempt.Reverse
-                    : TaxExempt.None
             }
         };
+
+        if (!featureService.IsEnabled(FeatureFlagKeys.PM37597_AlwaysEnableStripeAutomaticTax))
+        {
+            switch (businessUse)
+            {
+                case true:
+                    var existingTaxExemptStatus = addressChoice.Match(
+                        customer => customer.TaxExempt,
+                        _ => null!);
+
+                    var determinedTaxExemptStatus = TaxHelpers.DetermineTaxExemptStatus(country, existingTaxExemptStatus);
+                    options.CustomerDetails.TaxExempt = determinedTaxExemptStatus;
+                    break;
+                default:
+                    options.CustomerDetails.TaxExempt = TaxExempt.None;
+                    break;
+            }
+        }
 
         var taxId = addressChoice.Match(
             customer =>

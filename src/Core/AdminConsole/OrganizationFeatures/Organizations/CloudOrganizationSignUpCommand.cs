@@ -1,11 +1,10 @@
 ﻿// FIXME: Update this file to be null safe and then delete the line below
 #nullable disable
 
+using Bit.Core.AdminConsole.AbilitiesCache;
 using Bit.Core.AdminConsole.Entities;
-using Bit.Core.AdminConsole.Enums;
 using Bit.Core.AdminConsole.OrganizationFeatures.Policies;
 using Bit.Core.AdminConsole.OrganizationFeatures.Policies.PolicyRequirements;
-using Bit.Core.AdminConsole.Services;
 using Bit.Core.Billing.Enums;
 using Bit.Core.Billing.Organizations.Models;
 using Bit.Core.Billing.Organizations.Services;
@@ -19,7 +18,6 @@ using Bit.Core.Models.Data;
 using Bit.Core.Models.StaticStore;
 using Bit.Core.Platform.Push;
 using Bit.Core.Repositories;
-using Bit.Core.Services;
 using Bit.Core.Utilities;
 
 namespace Bit.Core.AdminConsole.OrganizationFeatures.Organizations;
@@ -37,23 +35,22 @@ public class CloudOrganizationSignUpCommand(
     IOrganizationUserRepository organizationUserRepository,
     IOrganizationBillingService organizationBillingService,
     IStripePaymentService paymentService,
-    IPolicyService policyService,
     IOrganizationRepository organizationRepository,
     IOrganizationApiKeyRepository organizationApiKeyRepository,
-    IApplicationCacheService applicationCacheService,
+    IOrganizationAbilityCacheService organizationAbilityCacheService,
     IPushRegistrationService pushRegistrationService,
     IPushNotificationService pushNotificationService,
     ICollectionRepository collectionRepository,
     IDeviceRepository deviceRepository,
     IPricingClient pricingClient,
-    IPolicyRequirementQuery policyRequirementQuery,
-    IFeatureService featureService) : ICloudOrganizationSignUpCommand
+    IPolicyRequirementQuery policyRequirementQuery) : ICloudOrganizationSignUpCommand
 {
     public async Task<SignUpOrganizationResponse> SignUpOrganizationAsync(OrganizationSignup signup)
     {
         var plan = await pricingClient.GetPlanOrThrow(signup.Plan);
 
         ValidatePasswordManagerPlan(plan, signup);
+        ValidateTrialLength(signup);
 
         if (signup.UseSecretsManager)
         {
@@ -82,7 +79,8 @@ public class CloudOrganizationSignUpCommand(
             MaxCollections = plan.PasswordManager.MaxCollections,
             MaxStorageGb = (short)(plan.PasswordManager.BaseStorageGb + signup.AdditionalStorageGb),
             UsePolicies = plan.HasPolicies,
-            UseMyItems = plan.HasPolicies, // TODO: use the plan property when added (PM-32366)
+            UseMyItems = plan.HasMyItems,
+            UseInviteLinks = plan.HasInviteLinks,
             UseSso = plan.HasSso,
             UseGroups = plan.HasGroups,
             UseEvents = plan.HasEvents,
@@ -242,22 +240,19 @@ public class CloudOrganizationSignUpCommand(
 
     private async Task ValidateSignUpPoliciesAsync(Guid ownerId)
     {
-        if (featureService.IsEnabled(FeatureFlagKeys.AutomaticConfirmUsers))
-        {
-            var requirement = await policyRequirementQuery.GetAsync<AutomaticUserConfirmationPolicyRequirement>(ownerId);
+        var requirement = await policyRequirementQuery.GetAsync<AutomaticUserConfirmationPolicyRequirement>(ownerId);
 
-            if (requirement.CannotCreateNewOrganization())
-            {
-                throw new BadRequestException("You may not create an organization. You belong to an organization " +
-                                              "which has a policy that prohibits you from being a member of any other organization.");
-            }
-        }
-
-        var anySingleOrgPolicies = await policyService.AnyPoliciesApplicableToUserAsync(ownerId, PolicyType.SingleOrg);
-        if (anySingleOrgPolicies)
+        if (requirement.CannotCreateNewOrganization())
         {
             throw new BadRequestException("You may not create an organization. You belong to an organization " +
                                           "which has a policy that prohibits you from being a member of any other organization.");
+        }
+
+        var singleOrgRequirement = await policyRequirementQuery.GetAsync<SingleOrganizationPolicyRequirement>(ownerId);
+        var error = singleOrgRequirement.CanCreateOrganization();
+        if (error is not null)
+        {
+            throw new BadRequestException(error.Message);
         }
     }
 
@@ -274,7 +269,7 @@ public class CloudOrganizationSignUpCommand(
                 Type = OrganizationApiKeyType.Default,
                 RevisionDate = DateTime.UtcNow,
             });
-            await applicationCacheService.UpsertOrganizationAbilityAsync(organization);
+            await organizationAbilityCacheService.UpsertOrganizationAbilityAsync(organization);
 
             // ownerId == default if the org is created by a provider - in this case it's created without an
             // owner and the first owner is immediately invited afterwards
@@ -332,10 +327,10 @@ public class CloudOrganizationSignUpCommand(
                 await paymentService.CancelAndRecoverChargesAsync(organization);
             }
 
-            if (organization.Id != default(Guid))
+            if (organization.Id != Guid.Empty)
             {
                 await organizationRepository.DeleteAsync(organization);
-                await applicationCacheService.DeleteOrganizationAbilityAsync(organization.Id);
+                await organizationAbilityCacheService.DeleteOrganizationAbilityAsync(organization.Id);
             }
 
             throw;
@@ -348,5 +343,13 @@ public class CloudOrganizationSignUpCommand(
         return devices
             .Where(d => !string.IsNullOrWhiteSpace(d.PushToken))
             .Select(d => d.Id.ToString());
+    }
+
+    private static void ValidateTrialLength(OrganizationSignup signup)
+    {
+        if (signup.TrialLength is < 0 or > 30)
+        {
+            throw new BadRequestException("Trial length must be between 0 and 30 days.");
+        }
     }
 }

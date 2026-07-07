@@ -1,21 +1,9 @@
-﻿using Bit.Core.AdminConsole.Entities;
-using Bit.Core.AdminConsole.Entities.Provider;
-using Bit.Core.AdminConsole.Models.Data.Provider;
-using Bit.Core.Models.Data.Organizations;
+﻿using Bit.Core.AdminConsole.Models.Data.Provider;
 
 namespace Bit.Core.Services;
 
 public interface IApplicationCacheService
 {
     [Obsolete("We are transitioning to a new cache pattern. Please consult the Admin Console team before using.", false)]
-    Task<IDictionary<Guid, OrganizationAbility>> GetOrganizationAbilitiesAsync();
-#nullable enable
-    Task<OrganizationAbility?> GetOrganizationAbilityAsync(Guid orgId);
-#nullable disable
-    [Obsolete("We are transitioning to a new cache pattern. Please consult the Admin Console team before using.", false)]
     Task<IDictionary<Guid, ProviderAbility>> GetProviderAbilitiesAsync();
-    Task UpsertOrganizationAbilityAsync(Organization organization);
-    Task UpsertProviderAbilityAsync(Provider provider);
-    Task DeleteOrganizationAbilityAsync(Guid organizationId);
-    Task DeleteProviderAbilityAsync(Guid providerId);
 }
