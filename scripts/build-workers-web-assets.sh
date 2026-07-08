@@ -6,7 +6,7 @@ WEB_DIR="$ROOT_DIR/clients/apps/web"
 OUTPUT_DIR="$WEB_DIR/build"
 
 cd "$WEB_DIR"
-npm run dist:oss:selfhost
+npm run dist:bit:selfhost
 
 if [[ ! -f "$OUTPUT_DIR/index.html" ]]; then
   echo "Expected Web Vault build output at $OUTPUT_DIR/index.html" >&2

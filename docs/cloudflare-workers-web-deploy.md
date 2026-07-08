@@ -21,7 +21,7 @@
 
 ```bash
 cd clients/apps/web
-npm run dist:oss:selfhost
+npm run dist:bit:selfhost
 ```
 
 输出目录：
