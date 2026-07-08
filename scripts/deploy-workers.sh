@@ -15,6 +15,9 @@ echo "Building Web Vault static assets..."
 cd "$ROOT_DIR"
 "$ROOT_DIR/scripts/build-workers-web-assets.sh"
 
-echo "Deploying Cloudflare Worker..."
+echo "Rendering production Wrangler config..."
 cd "$WORKERS_DIR"
-npx wrangler deploy "$@"
+WRANGLER_CONFIG_OUT="${WRANGLER_CONFIG_OUT:-wrangler.deploy.toml}" npm run render:wrangler -- --strict
+
+echo "Deploying Cloudflare Worker..."
+npx wrangler deploy --config "$WRANGLER_CONFIG_OUT" "$@"
