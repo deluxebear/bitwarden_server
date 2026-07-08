@@ -244,6 +244,7 @@ bitwarden_license/src/Sso/Sso.zip
 # Agents
 .agents/
 .cursor/
+d1-backups/
 
 # Claude Code
 CLAUDE.local.md
